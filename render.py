@@ -3,7 +3,7 @@
 Ancient Answers - Shorts Renderer
 Runs on GitHub Actions (free). Takes a script JSON, produces a finished 1080x1920 MP4:
   voice (edge-tts, with word timestamps) + AI images (Pollinations / Cloudflare FLUX)
-  + Ken Burns + crossfades + film look + word-by-word captions + synthesized cinematic score.
+  + Ken Burns + crossfades + film look + word-by-word captions (voice only, no background music).
 Usage: python render.py payload.json
 Env (all optional): CF_ACCOUNT_ID, CF_API_TOKEN, POLLINATIONS_KEY, FAKE_TTS=1, FAKE_IMAGES=1
 """
@@ -258,14 +258,6 @@ def kenburns(i, frames):
 
 TRANSITIONS = ["fade", "dissolve", "fadeblack", "smoothleft", "fade", "smoothup", "dissolve"]
 
-MUSIC_EXPR = (
-    "(0.30*sin(2*PI*110*t)+0.22*sin(2*PI*110.35*t)+0.20*sin(2*PI*164.81*t)+0.15*sin(2*PI*220*t)"
-    "+0.11*sin(2*PI*261.63*t)+0.07*sin(2*PI*329.63*t))*(0.65+0.35*sin(2*PI*0.07*t))*0.55"
-    "+0.55*sin(2*PI*(46+34*exp(-16*mod(t,1.7)))*t)*exp(-6*mod(t,1.7))"
-)
-BOOM_EXPR = "0.9*sin(2*PI*(36+60*exp(-4*t))*t)*exp(-2.4*t)"
-
-
 def main():
     payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     job = payload["job_id"]
@@ -320,16 +312,13 @@ def main():
     cmd += ["-f", "lavfi", "-i", f"color=c=0xFFD700:s={W}x10:r={FPS}:d={total:.2f}"]          # n   : progress bar
     cmd += ["-i", "voice.wav"]                                                              # n+1 : voice
     music_files = sorted(list((ROOT / "assets" / "music").glob("*.mp3")) + list((ROOT / "assets" / "music").glob("*.wav")))
-    if music_files:
+    mus_i = None
+    if music_files:  # music is OFF by default; only used if you drop a track in assets/music/
         mf = random.choice(music_files)
         log("using music:", mf.name)
         cmd += ["-stream_loop", "-1", "-i", str(mf)]
-        mus_vol = 0.22
-    else:
-        cmd += ["-f", "lavfi", "-i", f"aevalsrc='{MUSIC_EXPR}':s=48000:d={total:.2f}"]
-        mus_vol = 0.33
-    cmd += ["-f", "lavfi", "-i", f"aevalsrc='{BOOM_EXPR}':s=48000:d=1.8"]                    # n+3 : intro boom
-    bar_i, voice_i, mus_i, boom_i = n, n + 1, n + 2, n + 3
+        mus_i = n + 2
+    bar_i, voice_i = n, n + 1
 
     # 5) filter graph
     fg = []
@@ -352,16 +341,18 @@ def main():
     fg.append(f"[g][{bar_i}:v]overlay=x='-w+w*t/{total:.2f}':y=0:eval=frame:shortest=1[o]")
     fg.append("[o]ass=captions.ass[vout]")
 
-    fg.append(f"[{voice_i}:a]aformat=sample_rates=48000:channel_layouts=stereo,highpass=f=70,"
-              f"acompressor=threshold=0.1:ratio=3:attack=5:release=80:makeup=2,"
-              f"aecho=0.8:0.6:40|85:0.16|0.09,volume=1.25,apad=whole_dur={total:.2f},asplit=2[vo][vsc]")
-    fg.append(f"[{mus_i}:a]aformat=sample_rates=48000:channel_layouts=stereo,lowpass=f=2400,"
-              f"aecho=0.8:0.88:600|1000:0.28|0.18,volume={mus_vol},"
-              f"afade=t=in:d=1.2,afade=t=out:st={max(total - 2.2, 0):.2f}:d=2.2[mu]")
-    fg.append("[mu][vsc]sidechaincompress=threshold=0.015:ratio=9:attack=15:release=450[du]")
-    fg.append(f"[{boom_i}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=0.55[bo]")
-    fg.append(f"[vo][du][bo]amix=inputs=3:duration=first:normalize=0:dropout_transition=0,"
-              f"loudnorm=I=-14:TP=-1.5:LRA=11,atrim=0:{total:.2f}[aout]")
+    voice_chain = (f"[{voice_i}:a]aformat=sample_rates=48000:channel_layouts=stereo,highpass=f=70,"
+                   f"acompressor=threshold=0.1:ratio=3:attack=5:release=80:makeup=2,"
+                   f"aecho=0.8:0.6:40|85:0.16|0.09,volume=1.25,apad=whole_dur={total:.2f}")
+    if mus_i is None:
+        fg.append(voice_chain + f",loudnorm=I=-14:TP=-1.5:LRA=11,atrim=0:{total:.2f}[aout]")
+    else:
+        fg.append(voice_chain + ",asplit=2[vo][vsc]")
+        fg.append(f"[{mus_i}:a]aformat=sample_rates=48000:channel_layouts=stereo,volume=0.22,"
+                  f"afade=t=in:d=1.2,afade=t=out:st={max(total - 2.2, 0):.2f}:d=2.2[mu]")
+        fg.append("[mu][vsc]sidechaincompress=threshold=0.015:ratio=9:attack=15:release=450[du]")
+        fg.append(f"[vo][du]amix=inputs=2:duration=first:normalize=0:dropout_transition=0,"
+                  f"loudnorm=I=-14:TP=-1.5:LRA=11,atrim=0:{total:.2f}[aout]")
     (WORK / "graph.txt").write_text(";\n".join(fg))
 
     out_name = f"short_{job}.mp4"
