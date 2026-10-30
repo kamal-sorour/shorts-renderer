@@ -1,0 +1,4 @@
+edge-tts>=7.2.7
+gTTS>=2.5.4
+requests>=2.32
+Pillow>=10.4
