@@ -14,10 +14,6 @@ on:
 permissions:
   contents: write   # needed to publish the finished video as a Release asset
 
-concurrency:
-  group: render-short
-  cancel-in-progress: false
-
 jobs:
   render:
     runs-on: ubuntu-24.04
@@ -29,6 +25,7 @@ jobs:
       CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
       POLLINATIONS_KEY: ${{ secrets.POLLINATIONS_KEY }}
       N8N_CALLBACK_URL: ${{ secrets.N8N_CALLBACK_URL }}
+      N8N_CALLBACK_URL_MOTIV: ${{ secrets.N8N_CALLBACK_URL_MOTIV }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -62,17 +59,21 @@ jobs:
       - name: Notify n8n (success)
         if: success()
         run: |
-          [ -z "$N8N_CALLBACK_URL" ] && echo "no callback configured" && exit 0
+          URL="$N8N_CALLBACK_URL"
+          if [ "$(jq -r '.callback_key // empty' payload.json 2>/dev/null)" = "motiv" ]; then URL="$N8N_CALLBACK_URL_MOTIV"; fi
+          [ -z "$URL" ] && echo "no callback configured" && exit 0
           RESULT=$(cat out/result.json)
           jq -n --arg job "$JOB_ID" --arg url "${{ steps.publish.outputs.url }}" --argjson res "$RESULT" --argjson payload "$(cat payload.json)" \
             '{ok:true, job_id:$job, video_url:$url, result:$res, meta:$payload.meta}' \
-          | curl -sS -X POST "$N8N_CALLBACK_URL" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
+          | curl -sS -X POST "$URL" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
 
       - name: Notify n8n (failure)
         if: failure()
         run: |
-          [ -z "$N8N_CALLBACK_URL" ] && exit 0
+          URL="$N8N_CALLBACK_URL"
+          if [ "$(jq -r '.callback_key // empty' payload.json 2>/dev/null)" = "motiv" ]; then URL="$N8N_CALLBACK_URL_MOTIV"; fi
+          [ -z "$URL" ] && echo "no callback configured" && exit 0
           PAYLOAD_JSON=$(cat payload.json 2>/dev/null || echo '{}')
           jq -n --arg job "$JOB_ID" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --argjson payload "$PAYLOAD_JSON" \
             '{ok:false, job_id:$job, error:"render failed", run_url:$run, meta:$payload.meta}' \
-          | curl -sS -X POST "$N8N_CALLBACK_URL" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
+          | curl -sS -X POST "$URL" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5

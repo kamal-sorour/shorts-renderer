@@ -185,9 +185,11 @@ def clean_ass(s):
     return re.sub(r"[{}\\]", "", s).replace("\n", " ")
 
 
-def build_ass(words_abs, lang, channel, total):
+def build_ass(words_abs, lang, channel, total, accent="FFD700"):
     """words_abs: [(token, start, end)] absolute timeline"""
     arabic = lang.startswith("ar")
+    accent = re.sub(r"[^0-9A-Fa-f]", "", accent or "FFD700")[:6].ljust(6, "0")
+    gold = "&H00" + accent[4:6] + accent[2:4] + accent[0:2] + "&"   # RRGGBB -> ASS BGR
     font = "Noto Sans Arabic" if arabic else "Montserrat"
     size = 84 if arabic else 90
     hdr = f"""[Script Info]
@@ -230,7 +232,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if nxt is not None:
                     end = min(max(end, s + 0.25), nxt)
             end = max(end, s + 0.08)
-            hl = "{\\c" + GOLD_ASS + "\\fscx112\\fscy112\\t(0,90,\\fscx100\\fscy100)}" + disp[k] + "{\\r}"
+            hl = "{\\c" + gold + "\\fscx112\\fscy112\\t(0,90,\\fscx100\\fscy100)}" + disp[k] + "{\\r}"
             if arabic:
                 # libass lays override-runs out left-to-right, so emit runs as: after + highlighted + before
                 runs = [" ".join(disp[k + 1:]), hl, " ".join(disp[:k])]
@@ -303,13 +305,14 @@ def main():
 
     # 3) captions
     all_words = [w for s in scenes for w in s["words"]]
-    (WORK / "captions.ass").write_text(build_ass(all_words, lang, channel, total), encoding="utf-8")
+    (WORK / "captions.ass").write_text(build_ass(all_words, lang, channel, total, payload.get("accent", "FFD700")), encoding="utf-8")
 
     # 4) ffmpeg: inputs
+    bar_hex = re.sub(r"[^0-9A-Fa-f]", "", payload.get("accent", "FFD700"))[:6].ljust(6, "0")
     cmd = ["ffmpeg", "-y", "-hide_banner"]
     for s in scenes:
         cmd += ["-i", s["img"].name]
-    cmd += ["-f", "lavfi", "-i", f"color=c=0xFFD700:s={W}x10:r={FPS}:d={total:.2f}"]          # n   : progress bar
+    cmd += ["-f", "lavfi", "-i", f"color=c=0x{bar_hex}:s={W}x10:r={FPS}:d={total:.2f}"]          # n   : progress bar
     cmd += ["-i", "voice.wav"]                                                              # n+1 : voice
     music_files = sorted(list((ROOT / "assets" / "music").glob("*.mp3")) + list((ROOT / "assets" / "music").glob("*.wav")))
     mus_i = None

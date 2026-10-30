@@ -8,7 +8,8 @@ Stack (all free): edge-tts (voice + word timing), Pollinations / Cloudflare FLUX
 ## Setup
 1. Create a **public** GitHub repo named `shorts-renderer` and push all files in this folder (keep `.github/workflows/render.yml`).
 2. Repo > Settings > Secrets and variables > Actions > New secret:
-   - `N8N_CALLBACK_URL` = your n8n webhook PRODUCTION url (required)
+   - `N8N_CALLBACK_URL` = webhook PRODUCTION url of the Stoic workflow (required)
+   - `N8N_CALLBACK_URL_MOTIV` = webhook PRODUCTION url of the Motivation workflow
    - `POLLINATIONS_KEY` (optional, free key from auth.pollinations.ai, avoids rate limits)
    - `CF_ACCOUNT_ID` + `CF_API_TOKEN` (optional, Cloudflare Workers AI, reliable FLUX fallback)
 3. Repo > Settings > Actions > General > Workflow permissions: **Read and write**.
