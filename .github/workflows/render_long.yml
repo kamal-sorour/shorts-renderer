@@ -1,0 +1,76 @@
+name: Render Long
+run-name: Render long ${{ inputs.job_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "Unique job id"
+        required: true
+      payload:
+        description: "Script JSON built by n8n"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      PAYLOAD: ${{ inputs.payload }}
+      JOB_ID: ${{ inputs.job_id }}
+      PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+      PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+      N8N_CALLBACK_URL_LONG: ${{ secrets.N8N_CALLBACK_URL_LONG }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache Whisper models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: whisper-models-v1
+
+      - name: Install ffmpeg + fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-montserrat fonts-noto-core
+          pip install -r requirements.txt
+
+      - name: Render
+        run: |
+          printf '%s' "$PAYLOAD" > payload.json
+          python render_long.py payload.json
+
+      - name: Publish video as Release asset
+        id: publish
+        run: |
+          TAG="long-${JOB_ID}"
+          gh release create "$TAG" "out/long_${JOB_ID}.mp4" --title "Long $JOB_ID" --notes "auto-rendered" --latest=false
+          echo "url=https://github.com/${{ github.repository }}/releases/download/${TAG}/long_${JOB_ID}.mp4" >> "$GITHUB_OUTPUT"
+          gh release list --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("long-"))] | .[6:][].tagName' | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
+
+      - name: Notify n8n (success)
+        if: success()
+        run: |
+          [ -z "$N8N_CALLBACK_URL_LONG" ] && echo "no callback configured" && exit 0
+          jq -n --arg job "$JOB_ID" --arg url "${{ steps.publish.outputs.url }}" --argjson res "$(cat out/result.json)" --argjson payload "$(cat payload.json)" \
+            '{ok:true, job_id:$job, video_url:$url, result:$res, meta:$payload.meta}' \
+          | curl -sS -X POST "$N8N_CALLBACK_URL_LONG" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
+
+      - name: Notify n8n (failure)
+        if: failure()
+        run: |
+          [ -z "$N8N_CALLBACK_URL_LONG" ] && exit 0
+          PAYLOAD_JSON=$(cat payload.json 2>/dev/null || echo '{}')
+          jq -n --arg job "$JOB_ID" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --argjson payload "$PAYLOAD_JSON" \
+            '{ok:false, job_id:$job, error:"render failed", run_url:$run, meta:$payload.meta}' \
+          | curl -sS -X POST "$N8N_CALLBACK_URL_LONG" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5

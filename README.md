@@ -17,3 +17,8 @@ Stack (all free): edge-tts (voice + word timing), Pollinations / Cloudflare FLUX
 
 ## Local test (no network needed)
 FAKE_TTS=1 FAKE_IMAGES=1 python render.py payload.json
+
+## Long-form explainer (render_long.py)
+Workflow: `.github/workflows/render_long.yml`. Extra secrets: `N8N_CALLBACK_URL_LONG`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`.
+Character PNGs go in `assets/character/` (see the README.txt there). Optional music in `assets/music/`.
+Local test (no network): FAKE_TTS=1 FAKE_BROLL=1 CHAR_DIR=/path/to/pngs python render_long.py payload.json
