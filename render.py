@@ -82,24 +82,62 @@ def tts_line(text, voice, rate, pitch, lang, path):
     return None
 
 
-def align_words(text, events, dur):
+def span_map(tokens, speech_start, speech_end):
+    """spread tokens over the real speech span, weighted by length"""
+    wts = [len(strip_ar(t)) + 2 for t in tokens]
+    tot, t, out = float(sum(wts)), speech_start, []
+    for tok, w in zip(tokens, wts):
+        span = (speech_end - speech_start) * w / tot
+        out.append((tok, t, t + span))
+        t += span
+    return out
+
+
+def align_words(text, events, dur, audio_path=None, lang="en", force_whisper=False):
     """Return [(token, start, end)] for one line, always covering the whole line."""
     tokens = text.split()
-    if events and len(events) == len(tokens):
+    out = None
+    if events and len(events) == len(tokens) and not force_whisper:
         out = [(tokens[i], events[i][1], events[i][2]) for i in range(len(tokens))]
-    elif events:
-        out = [(e[0], e[1], e[2]) for e in events]
     else:
-        wts = [len(t) + 2 for t in tokens]
-        tot = float(sum(wts))
-        out, t = [], 0.0
-        usable = max(dur - 0.15, 0.5)
-        for tok, w in zip(tokens, wts):
-            span = usable * w / tot
-            out.append((tok, t, t + span))
-            t += span
-    # clamp into [0, dur]
+        ww = whisper_words(audio_path, lang) if audio_path else None
+        if ww:
+            log(f"whisper timing used ({len(ww)} words vs {len(tokens)} tokens)")
+            if len(ww) == len(tokens):
+                out = [(tokens[i], ww[i][1], ww[i][2]) for i in range(len(tokens))]
+            else:  # different segmentation: keep the real speech span, spread tokens inside it
+                out = span_map(tokens, ww[0][1], ww[-1][2])
+        elif events:
+            out = [(e[0], e[1], e[2]) for e in events]
+        else:
+            out = span_map(tokens, 0.0, max(dur - 0.15, 0.5))
     return [(w, max(0.0, min(s, dur)), max(0.0, min(e, dur))) for w, s, e in out]
+
+
+# ----------------------------------------------------------------------------- Whisper (word timing fallback)
+_WHISPER = {}
+
+
+def whisper_words(path, lang):
+    """Word timestamps from faster-whisper (free, CPU). Returns [(word,start,end)] or None."""
+    try:
+        from faster_whisper import WhisperModel
+        size = "small" if lang.startswith("ar") else "base.en" if lang.startswith("en") else "base"
+        if size not in _WHISPER:
+            _WHISPER[size] = WhisperModel(size, device="cpu", compute_type="int8")
+        segs, _ = _WHISPER[size].transcribe(str(path), language=lang[:2], word_timestamps=True, beam_size=1)
+        out = [(w.word.strip(), float(w.start), float(w.end)) for sg in segs for w in (sg.words or []) if w.word.strip()]
+        return out or None
+    except Exception as e:  # noqa
+        log("whisper unavailable:", e)
+        return None
+
+
+AR_MARKS = re.compile("[\u064B-\u065F\u0670\u0640]")
+
+
+def strip_ar(t):
+    return AR_MARKS.sub("", t)
 
 
 # ----------------------------------------------------------------------------- Images
@@ -207,6 +245,8 @@ Style: Brand,{font},34,&H78FFFFFF,&H78FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
+    if arabic:
+        words_abs = [(strip_ar(w), s_, e_) for w, s_, e_ in words_abs]
     ev = []
     if channel:
         ev.append(f"Dialogue: 0,{ass_time(0)},{ass_time(total)},Brand,,0,0,0,,{clean_ass(channel)}")
@@ -285,7 +325,7 @@ def main():
         gap = 0.40 if i == 0 else (0.12 if i == n - 1 else 0.14)
         d = max(dur + gap, 2.1)
         run(["ffmpeg", "-y", "-i", mp3, "-ar", 48000, "-ac", 2, "-af", f"apad=whole_dur={d:.3f}", wav])
-        words = align_words(ln["text"], ev, dur)
+        words = align_words(ln["text"], ev, dur, mp3, lang, payload.get("whisper") == "always")
         scenes.append({"i": i, "d": d, "start": t0, "dur": dur, "wav": wav,
                        "words": [(w, t0 + s, t0 + e) for w, s, e in words], "prompt": ln.get("image_prompt", "")})
         t0 += d
