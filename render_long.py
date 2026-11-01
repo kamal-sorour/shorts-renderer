@@ -144,6 +144,47 @@ def pexels_photo(q, used, idx):
     return None
 
 
+
+def pixabay_photo(q, used, idx):
+    key = os.environ.get("PIXABAY_API_KEY", "").strip()
+    if not key:
+        return None
+    r = _get("https://pixabay.com/api/?" + urllib.parse.urlencode({"key": key, "q": q, "image_type": "photo", "orientation": "horizontal", "per_page": 12, "safesearch": "true"}))
+    if not r:
+        return None
+    hits = [h for h in r.json().get("hits", []) if f"pixabayimg:{h['id']}" not in used]
+    random.shuffle(hits)
+    for h in hits[:3]:
+        p = WORK / f"img_{idx}.jpg"
+        if _download(h.get("largeImageURL") or h.get("webformatURL"), p, 20):
+            used.add(f"pixabayimg:{h['id']}")
+            return {"kind": "image", "path": p, "credit": f"Image by {h.get('user', 'Pixabay')} on Pixabay ({h.get('pageURL', '')})"}
+    return None
+
+
+def openverse_image(q, used, idx):
+    """No API key needed. Only CC0 / public domain / CC BY (no ShareAlike, no NonCommercial)."""
+    r = _get("https://api.openverse.org/v1/images/?" + urllib.parse.urlencode({
+        "q": q, "license": "cc0,pdm,by", "page_size": 12, "mature": "false", "aspect_ratio": "wide"}))
+    if not r:
+        return None
+    res = [x for x in r.json().get("results", []) if f"ov:{x.get('id')}" not in used]
+    random.shuffle(res)
+    for x in res[:4]:
+        p = WORK / f"img_{idx}.jpg"
+        if _download(x.get("url") or x.get("thumbnail"), p, 20):
+            try:
+                im = Image.open(p).convert("RGB")
+                if im.width < 900:
+                    continue
+                im.save(p, quality=92)
+            except Exception:
+                continue
+            used.add(f"ov:{x.get('id')}")
+            return {"kind": "image", "path": p, "credit": x.get("attribution") or f"{x.get('title', 'image')} by {x.get('creator', 'unknown')} ({x.get('license', '').upper()}) {x.get('foreign_landing_url', '')}"}
+    return None
+
+
 def fake_visual(q, idx):
     p = WORK / f"clip_{idx}.mp4"
     run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"testsrc2=s=1280x720:d=6:r=24", "-pix_fmt", "yuv420p", p])
@@ -165,7 +206,7 @@ def get_visual(queries, idx, used):
     if os.environ.get("FAKE_BROLL") == "1":
         return fake_visual(queries[0] if queries else "x", idx)
     for q in queries:
-        for fn in (pexels_video, pixabay_video, wikimedia_image, pexels_photo):
+        for fn in (pexels_video, pixabay_video, wikimedia_image, openverse_image, pixabay_photo, pexels_photo):
             try:
                 v = fn(q, used, idx)
             except Exception as e:  # noqa
@@ -245,6 +286,11 @@ def render_chunk(args):
         ent = _G["sets"][lay].get(emo) or _G["sets"][lay]["neutral"]
         t = i / FPS
         canvas = Image.new("RGBA", (W, H + 80), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(canvas)
+        dr.rectangle([0, 0, W, 6], fill=(0, 0, 0, 120))
+        dr.rectangle([0, 0, int(W * (i + 1) / P["total"]), 6], fill=_G["rgb"] + (235,))
+        for tx in P["ticks"]:
+            dr.rectangle([tx - 1, 0, tx + 1, 6], fill=(255, 255, 255, 235))
         x = W - ent["w"] - (36 if lay == "broll" else 48) + int(3 * math.sin(t * 1.4))
         bounce = -int(amp * 15) - int(12 * max(0.0, 1 - since / 7.0)) + int(2 * math.sin(t * 2.2))
         y = H - ent["h"] + 26 + bounce
@@ -311,7 +357,7 @@ def make_segment(i, frames, vis, beat, hostbg):
     return out
 
 
-def build_ass(words, scenes, accent, channel, total):
+def build_ass(words, scenes, accent, channel, total, title='', credits=()):
     acc = re.sub(r"[^0-9A-Fa-f]", "", accent)[:6].ljust(6, "0")
     acc_ass = "&H00" + acc[4:6] + acc[2:4] + acc[0:2] + "&"
     hdr = f"""[Script Info]
@@ -326,6 +372,9 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Cap,Montserrat,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,100,100,0,0,1,3.2,0,2,60,470,44,1
 Style: Big,Montserrat ExtraBold,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H78000000,-1,0,0,0,100,100,0,0,3,10,0,4,70,520,0,1
 Style: Chap,Montserrat ExtraBold,46,{acc_ass},{acc_ass},&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,3,0,8,60,60,52,1
+Style: Title,Montserrat ExtraBold,64,{acc_ass},{acc_ass},&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,3,0,5,60,470,0,1
+Style: CredHead,Montserrat ExtraBold,40,{acc_ass},{acc_ass},&H00111111,&H00000000,-1,0,0,0,100,100,2,0,1,0,0,7,170,520,125,1
+Style: Credits,Montserrat,27,&H00222222,&H00222222,&H00FFFFFF,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,170,520,195,1
 Style: Brand,Montserrat,26,&H78FFFFFF,&H78FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,1.5,0,9,40,40,26,1
 
 [Events]
@@ -355,12 +404,22 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 t = base.clean_ass(tok)
                 parts.append("{\\c" + acc_ass + "}" + t + "{\\r}" if j == k else t)
             ev.append(f"Dialogue: 1,{base.ass_time(s)},{base.ass_time(end)},Cap,,0,0,0,,{' '.join(parts)}")
+    if title:
+        flick = ("{\\blur6\\alpha&H00&\\t(90,130,\\alpha&HFF&)\\t(130,190,\\alpha&H00&)\\t(300,340,\\alpha&HFF&)\\t(340,380,\\alpha&H00&)"
+                 "\\t(520,560,\\alpha&H90&)\\t(560,610,\\alpha&H00&)\\t(3000,3600,\\alpha&HFF&)}")
+        ev.append(f"Dialogue: 4,{base.ass_time(0.3)},{base.ass_time(3.9)},Title,,0,0,0,,{flick}{base.clean_ass(title[:90].upper())}")
     for sc in scenes:
+        if sc.get("outro"):
+            ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.3)},{base.ass_time(sc['start'] + sc['d'])},CredHead,,0,0,0,,SOURCES & CREDITS")
+            body = "\\N".join(base.clean_ass(re.sub(r"\s*\(https?://[^)]*\)", "", c))[:78] for c in list(credits)[:9]) or "Stock footage and images from free-license libraries."
+            ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.3)},{base.ass_time(sc['start'] + sc['d'])},Credits,,0,0,0,,{body}")
+            continue
         if sc.get("onscreen"):
             e = sc["start"] + max(sc["d"], 2.6)
             ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.2)},{base.ass_time(e)},Big,,0,0,0,,{{\\fad(200,200)}}{base.clean_ass(sc['onscreen'][:46].upper())}")
         if sc.get("chapter"):
-            ev.append(f"Dialogue: 3,{base.ass_time(sc['start'])},{base.ass_time(sc['start'] + 3.2)},Chap,,0,0,0,,{{\\fad(350,350)\\blur4}}{base.clean_ass(sc['chapter'])}")
+            cs = sc["start"] + (4.0 if sc["i"] == 0 and title else 0)
+            ev.append(f"Dialogue: 3,{base.ass_time(cs)},{base.ass_time(cs + 3.2)},Chap,,0,0,0,,{{\\fad(350,350)\\blur4}}{base.clean_ass(sc['chapter'])}")
     return hdr + "\n".join(ev) + "\n"
 
 
@@ -404,9 +463,6 @@ def main():
     total_frames = sum(s["frames"] for s in scenes)
     total = total_frames / FPS
     log(f"narration {total:.1f}s ({total / 60:.1f} min), tts done in {time.time() - t_start:.0f}s")
-    (WORK / "list.txt").write_text("".join(f"file '{s['wav'].name}'\n" for s in scenes))
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", 0, "-i", "list.txt", "-c", "copy", "voice.wav"], cwd=WORK)
-
     # 2) visuals + segments
     used, credits = set(), []
     hb = host_bg()
@@ -421,6 +477,19 @@ def main():
         s["seg"] = make_segment(s["i"], s["frames"], vis, s["beat"], hb)
         if s["i"] % 10 == 0:
             log(f"segments {s['i'] + 1}/{n}  ({time.time() - t_start:.0f}s)")
+    # outro: sources & credits card (also satisfies attribution inside the video itself)
+    uniq_credits = list(dict.fromkeys(credits))
+    ofr = 7 * FPS
+    owav = WORK / "outro.wav"
+    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "7", owav])
+    scenes.append({"i": n, "start": t0, "d": 7.0, "frames": ofr, "wav": owav, "text": "", "words": [], "emotion": "smile", "beat": "host",
+                   "queries": [], "onscreen": None, "chapter": None, "outro": True,
+                   "seg": make_segment(n, ofr, {"kind": "image", "path": hb}, "host", hb)})
+    t0 += 7.0
+    total_frames = sum(s["frames"] for s in scenes)
+    total = total_frames / FPS
+    (WORK / "list.txt").write_text("".join(f"file '{s['wav'].name}'\n" for s in scenes))
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", 0, "-i", "list.txt", "-c", "copy", "voice.wav"], cwd=WORK)
     (WORK / "segs.txt").write_text("".join(f"file '{s['seg'].name}'\n" for s in scenes))
     run(["ffmpeg", "-y", "-f", "concat", "-safe", 0, "-i", "segs.txt", "-c", "copy", "bg.mp4"], cwd=WORK)
 
@@ -433,7 +502,12 @@ def main():
         for k in range(s["frames"]):
             emo.append(e); lay.append(s["beat"]); since.append(k)
     amp = envelope(WORK / "voice.wav", total_frames)
-    _G["plan"] = {"emo": emo, "lay": lay, "since": since, "amp": amp}
+    ticks, fcount = [], 0
+    for s_ in scenes:
+        if s_.get("chapter") and fcount > 0:
+            ticks.append(int(W * fcount / total_frames))
+        fcount += s_["frames"]
+    _G["plan"] = {"emo": emo, "lay": lay, "since": since, "amp": amp, "total": total_frames, "ticks": ticks}
     fdir = WORK / "frames"
     fdir.mkdir()
     chunk = 240
@@ -444,7 +518,7 @@ def main():
 
     # 4) captions + final mix
     allw = [w for s in scenes for w in s["words"]]
-    (WORK / "captions.ass").write_text(build_ass(allw, scenes, accent, payload.get("channel", ""), total), encoding="utf-8")
+    (WORK / "captions.ass").write_text(build_ass(allw, scenes, accent, payload.get("channel", ""), total, (payload.get("meta") or {}).get("title", ""), uniq_credits), encoding="utf-8")
     music = sorted(list((ROOT / "assets" / "music").glob("*.mp3")) + list((ROOT / "assets" / "music").glob("*.wav")))
     cmd = ["ffmpeg", "-y", "-hide_banner", "-i", "bg.mp4", "-framerate", str(FPS), "-i", "frames/f_%06d.png", "-i", "voice.wav"]
     voice_chain = ("[2:a]aformat=sample_rates=48000:channel_layouts=stereo,highpass=f=70,acompressor=threshold=0.1:ratio=3:attack=5:release=80:makeup=2,"
@@ -470,7 +544,7 @@ def main():
     chapters = [{"t": fmt_ts(s["start"]), "title": s["chapter"]} for s in scenes if s.get("chapter")]
     if chapters and chapters[0]["t"] != "0:00":
         chapters.insert(0, {"t": "0:00", "title": "Intro"})
-    uniq = list(dict.fromkeys(credits))
+    uniq = uniq_credits
     res = {"job_id": job, "file": outname, "duration": round(total, 1), "size_mb": round((OUT / outname).stat().st_size / 1e6, 1),
            "lines": n, "chapters": chapters, "credits": uniq[:60], "render_seconds": int(time.time() - t_start)}
     (OUT / "result.json").write_text(json.dumps(res, ensure_ascii=False))

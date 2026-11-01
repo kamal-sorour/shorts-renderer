@@ -22,3 +22,8 @@ FAKE_TTS=1 FAKE_IMAGES=1 python render.py payload.json
 Workflow: `.github/workflows/render_long.yml`. Extra secrets: `N8N_CALLBACK_URL_LONG`, `PEXELS_API_KEY`, `PIXABAY_API_KEY`.
 Character PNGs go in `assets/character/` (see the README.txt there). Optional music in `assets/music/`.
 Local test (no network): FAKE_TTS=1 FAKE_BROLL=1 CHAR_DIR=/path/to/pngs python render_long.py payload.json
+
+## v3 additions
+- **No Pexels key needed.** Image/video sources: Pixabay (video + photo, key), Wikimedia Commons, Openverse (no key), Pexels only if a key exists.
+- **Auto QC** after every render (tools/qc, MIT, from video-editing-skills): resolution, fps, duration, audio level/peak, black frames. Result is added to the callback (`result.qc`) and a proof sheet PNG is attached to the release (`proof_url`).
+- **Long video extras:** neon-flicker title bumper, chapter progress bar with ticks, "Sources & credits" end card, attribution built into the video.

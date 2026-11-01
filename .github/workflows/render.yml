@@ -53,11 +53,27 @@ jobs:
           printf '%s' "$PAYLOAD" > payload.json
           python render.py payload.json
 
+      - name: Quality check (QC)
+        continue-on-error: true
+        run: |
+          (cd tools/qc && npm install --silent --no-audit --no-fund)
+          F="out/short_${JOB_ID}.mp4"
+          node tools/qc/verify-render.mjs --input "$F" --profile shorts --loudness=-20:-8 --report out/qc.json || true
+          node tools/qc/proof-sheet.mjs --inputs "$F" --frames 6 --out out/proof.png || true
+          if [ -f out/qc.json ]; then
+            jq --slurpfile q out/qc.json '. + {qc: {ok: $q[0].ok, errors: ($q[0].errors // []), warnings: ($q[0].warnings // [])}}' out/result.json > out/r2.json && mv out/r2.json out/result.json
+          fi
+
       - name: Publish video as Release asset
         id: publish
         run: |
           FILE="out/short_${JOB_ID}.mp4"
-          gh release create "$JOB_ID" "$FILE" --title "Short $JOB_ID" --notes "auto-rendered" --latest=false
+          ASSETS=("$FILE")
+          if [ -f out/proof.png ]; then
+            ASSETS+=("out/proof.png")
+            echo "proof=https://github.com/${{ github.repository }}/releases/download/${JOB_ID}/proof.png" >> "$GITHUB_OUTPUT"
+          fi
+          gh release create "$JOB_ID" "${ASSETS[@]}" --title "Short $JOB_ID" --notes "auto-rendered" --latest=false
           echo "url=https://github.com/${{ github.repository }}/releases/download/${JOB_ID}/short_${JOB_ID}.mp4" >> "$GITHUB_OUTPUT"
           # keep only the newest 30 releases so the repo stays clean
           gh release list --limit 200 --json tagName --jq '.[30:][].tagName' | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
@@ -69,8 +85,8 @@ jobs:
           if [ "$(jq -r '.callback_key // empty' payload.json 2>/dev/null)" = "motiv" ]; then URL="$N8N_CALLBACK_URL_MOTIV"; fi
           [ -z "$URL" ] && echo "no callback configured" && exit 0
           RESULT=$(cat out/result.json)
-          jq -n --arg job "$JOB_ID" --arg url "${{ steps.publish.outputs.url }}" --argjson res "$RESULT" --argjson payload "$(cat payload.json)" \
-            '{ok:true, job_id:$job, video_url:$url, result:$res, meta:$payload.meta}' \
+          jq -n --arg job "$JOB_ID" --arg url "${{ steps.publish.outputs.url }}" --arg proof "${{ steps.publish.outputs.proof }}" --argjson res "$RESULT" --argjson payload "$(cat payload.json)" \
+            '{ok:true, job_id:$job, video_url:$url, proof_url:$proof, result:$res, meta:$payload.meta}' \
           | curl -sS -X POST "$URL" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
 
       - name: Notify n8n (failure)
