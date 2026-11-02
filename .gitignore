@@ -2,3 +2,5 @@ work/
 out/
 payload.json
 __pycache__/
+node_modules/
+work_long/

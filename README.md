@@ -27,3 +27,8 @@ Local test (no network): FAKE_TTS=1 FAKE_BROLL=1 CHAR_DIR=/path/to/pngs python r
 - **No Pexels key needed.** Image/video sources: Pixabay (video + photo, key), Wikimedia Commons, Openverse (no key), Pexels only if a key exists.
 - **Auto QC** after every render (tools/qc, MIT, from video-editing-skills): resolution, fps, duration, audio level/peak, black frames. Result is added to the callback (`result.qc`) and a proof sheet PNG is attached to the release (`proof_url`).
 - **Long video extras:** neon-flicker title bumper, chapter progress bar with ticks, "Sources & credits" end card, attribution built into the video.
+
+## v4 (production)
+- Long video: fixed character size/position, 2-3 cuts per line with punch-in, slow-mo for short clips, animated charts (bar/line/timeline), no progress bar, no credits card (credits go to the description).
+- **Resume:** finished voice/segments are cached per job; failed renders auto-resume (up to 3 attempts).
+- **YouTube private upload** (tools/yt_upload.py): secrets YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN. Uploads as PRIVATE, only if meta.upload is true and QC passed.

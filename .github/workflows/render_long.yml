@@ -1,5 +1,5 @@
 name: Render Long
-run-name: Render long ${{ inputs.job_id }}
+run-name: Render long ${{ inputs.job_id }} (attempt ${{ inputs.attempt }})
 
 on:
   workflow_dispatch:
@@ -10,20 +10,29 @@ on:
       payload:
         description: "Script JSON built by n8n"
         required: true
+      attempt:
+        description: "Auto-resume counter (leave as 1)"
+        required: false
+        default: "1"
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   render:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 180
     env:
       PAYLOAD: ${{ inputs.payload }}
       JOB_ID: ${{ inputs.job_id }}
+      ATTEMPT: ${{ inputs.attempt }}
       PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
       N8N_CALLBACK_URL_LONG: ${{ secrets.N8N_CALLBACK_URL_LONG }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +48,16 @@ jobs:
           path: ~/.cache/huggingface
           key: whisper-models-v1
 
+      - name: Restore partial work (resume after a failure)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            work_long
+            !work_long/frames
+          key: long-${{ inputs.job_id }}-none
+          restore-keys: |
+            long-${{ inputs.job_id }}-
+
       - name: Install ffmpeg + fonts
         run: |
           sudo apt-get update -qq
@@ -46,9 +65,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Render
+        id: render
         run: |
           printf '%s' "$PAYLOAD" > payload.json
           python render_long.py payload.json
+
+      - name: Save partial work (so a retry resumes here)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            work_long
+            !work_long/frames
+          key: long-${{ inputs.job_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.attempt }}
 
       - name: Quality check (QC)
         continue-on-error: true
@@ -74,6 +103,14 @@ jobs:
           echo "url=https://github.com/${{ github.repository }}/releases/download/${TAG}/long_${JOB_ID}.mp4" >> "$GITHUB_OUTPUT"
           gh release list --limit 100 --json tagName --jq '[.[] | select(.tagName | startswith("long-"))] | .[6:][].tagName' | xargs -r -I{} gh release delete {} --cleanup-tag -y || true
 
+      - name: Upload to YouTube as private draft (only if enabled and QC passed)
+        continue-on-error: true
+        run: |
+          python tools/yt_upload.py "out/long_${JOB_ID}.mp4" payload.json out/result.json || true
+          if [ -f out/youtube.json ]; then
+            jq --slurpfile y out/youtube.json '. + {youtube: $y[0]}' out/result.json > out/r3.json && mv out/r3.json out/result.json
+          fi
+
       - name: Notify n8n (success)
         if: success()
         run: |
@@ -82,11 +119,18 @@ jobs:
             '{ok:true, job_id:$job, video_url:$url, proof_url:$proof, result:$res, meta:$payload.meta}' \
           | curl -sS -X POST "$N8N_CALLBACK_URL_LONG" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5
 
-      - name: Notify n8n (failure)
-        if: failure()
+      - name: Auto-resume after a failure (up to 3 attempts)
+        if: failure() && fromJSON(inputs.attempt) < 3
+        run: |
+          NEXT=$(( ATTEMPT + 1 ))
+          echo "Attempt $ATTEMPT failed. Re-dispatching attempt $NEXT (finished work is restored from cache)."
+          gh workflow run render_long.yml -f job_id="$JOB_ID" -f payload="$PAYLOAD" -f attempt="$NEXT"
+
+      - name: Notify n8n (failure, final attempt)
+        if: failure() && fromJSON(inputs.attempt) >= 3
         run: |
           [ -z "$N8N_CALLBACK_URL_LONG" ] && exit 0
           PAYLOAD_JSON=$(cat payload.json 2>/dev/null || echo '{}')
           jq -n --arg job "$JOB_ID" --arg run "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" --argjson payload "$PAYLOAD_JSON" \
-            '{ok:false, job_id:$job, error:"render failed", run_url:$run, meta:$payload.meta}' \
+            '{ok:false, job_id:$job, error:"render failed after 3 attempts", run_url:$run, meta:$payload.meta}' \
           | curl -sS -X POST "$N8N_CALLBACK_URL_LONG" -H 'Content-Type: application/json' -d @- --retry 3 --retry-delay 5

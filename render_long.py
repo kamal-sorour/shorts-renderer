@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 import requests
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import render as base   # reuse tts_line, align_words, probe_dur, run, log, strip_ar, ass_time, clean_ass
 
@@ -247,22 +247,21 @@ def normalize_chars():
 
 
 _G = {}
+CHAR_H = 470          # the character is ALWAYS this size and in this corner
+GRADE = "eq=brightness=-0.05:contrast=1.07:saturation=1.05,colorbalance=bs=0.05:bh=0.03:rs=-0.02,vignette=PI/6"
 
 
 def build_char_sets(chars, accent):
-    sizes = {"broll": 400, "host": 540}
     rgb = tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4))
     sets = {}
-    for lay, th in sizes.items():
-        sets[lay] = {}
-        for k, im in chars.items():
-            s = th / im.height
-            c = im.resize((max(1, int(im.width * s)), th), Image.LANCZOS)
-            pad = 46
-            a = Image.new("L", (c.width + pad * 2, c.height + pad * 2), 0)
-            a.paste(c.getchannel("A"), (pad, pad))
-            a = a.filter(ImageFilter.GaussianBlur(22))
-            sets[lay][k] = {"img": c, "alpha": a, "pad": pad, "w": c.width, "h": c.height}
+    for k, im in chars.items():
+        s = CHAR_H / im.height
+        c = im.resize((max(1, int(im.width * s)), CHAR_H), Image.LANCZOS)
+        pad = 46
+        a = Image.new("L", (c.width + pad * 2, c.height + pad * 2), 0)
+        a.paste(c.getchannel("A"), (pad, pad))
+        a = a.filter(ImageFilter.GaussianBlur(22))
+        sets[k] = {"img": c, "alpha": a, "pad": pad, "w": c.width, "h": c.height}
     _G["rgb"] = rgb
     return sets
 
@@ -282,23 +281,19 @@ def render_chunk(args):
     s, e, outdir = args
     P = _G["plan"]
     for i in range(s, e):
-        lay, emo, amp, since = P["lay"][i], P["emo"][i], float(P["amp"][i]), int(P["since"][i])
-        ent = _G["sets"][lay].get(emo) or _G["sets"][lay]["neutral"]
+        out = Path(outdir) / f"f_{i + 1:06d}.png"
+        if out.exists():
+            continue
+        emo, amp, since = P["emo"][i], float(P["amp"][i]), int(P["since"][i])
+        ent = _G["sets"].get(emo) or _G["sets"]["neutral"]
         t = i / FPS
         canvas = Image.new("RGBA", (W, H + 80), (0, 0, 0, 0))
-        dr = ImageDraw.Draw(canvas)
-        dr.rectangle([0, 0, W, 6], fill=(0, 0, 0, 120))
-        dr.rectangle([0, 0, int(W * (i + 1) / P["total"]), 6], fill=_G["rgb"] + (235,))
-        for tx in P["ticks"]:
-            dr.rectangle([tx - 1, 0, tx + 1, 6], fill=(255, 255, 255, 235))
-        x = W - ent["w"] - (36 if lay == "broll" else 48) + int(3 * math.sin(t * 1.4))
-        bounce = -int(amp * 15) - int(12 * max(0.0, 1 - since / 7.0)) + int(2 * math.sin(t * 2.2))
-        y = H - ent["h"] + 26 + bounce
-        lvl = int(round(amp * 7))
-        g = glow_img(ent, lvl)
-        canvas.alpha_composite(g, (x - ent["pad"], y - ent["pad"]))
+        x = W - ent["w"] - 34
+        bounce = -int(amp * 9) - int(8 * max(0.0, 1 - since / 6.0)) + int(2 * math.sin(t * 2.0))
+        y = H - ent["h"] + 24 + bounce
+        canvas.alpha_composite(glow_img(ent, int(round(amp * 7))), (x - ent["pad"], y - ent["pad"]))
         canvas.alpha_composite(ent["img"], (x, y))
-        canvas.crop((0, 0, W, H)).save(Path(outdir) / f"f_{i + 1:06d}.png", compress_level=1)
+        canvas.crop((0, 0, W, H)).save(out, compress_level=1)
     return e - s
 
 
@@ -319,9 +314,11 @@ def envelope(wav, nframes):
     return out[:nframes]
 
 
-# ------------------------------------------------------------------ Video segments / captions
+# ------------------------------------------------------------------ segments
 def host_bg():
     p = WORK / "host_bg.png"
+    if p.exists():
+        return p
     im = Image.new("RGB", (W, H), (246, 248, 244))
     d = ImageDraw.Draw(im)
     for y in range(H):
@@ -337,27 +334,155 @@ def host_bg():
     return p
 
 
-def make_segment(i, frames, vis, beat, hostbg):
-    out = WORK / f"seg_{i:03d}.mp4"
-    common = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS), "-frames:v", str(frames)]
-    if beat == "host" or vis["kind"] == "image":
-        src = hostbg if beat == "host" else vis["path"]
-        zoom = f"min(1+0.06*on/{frames},1.06)" if i % 2 == 0 else f"max(1.06-0.06*on/{frames},1.0)"
-        vf = (f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,"
-              f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={FPS},format=yuv420p")
-        if beat != "host":
-            vf += ",eq=brightness=-0.07:contrast=1.06,vignette=PI/6"
-        run(["ffmpeg", "-y", "-i", src, "-vf", vf] + common + [out])
+ENC = ["-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p", "-r", str(FPS)]
+
+
+def seg_video(out, vis, frames):
+    need = frames / FPS
+    f = max(0.6, min(1.0, vis["dur"] / need)) if vis["dur"] < need else 1.0
+    eff = vis["dur"] / f
+    if eff < need + 0.3:
+        pre = ["-stream_loop", "-1"]
     else:
-        need = frames / FPS
-        pre = ["-stream_loop", "-1"] if vis["dur"] < need + 0.3 else ["-ss", f"{random.uniform(0, max(vis['dur'] - need - 0.2, 0)):.2f}"]
-        vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
-              f"eq=brightness=-0.07:contrast=1.06:saturation=1.05,vignette=PI/6,format=yuv420p")
-        run(["ffmpeg", "-y"] + pre + ["-i", vis["path"], "-vf", vf] + common + [out])
-    return out
+        pre = ["-ss", f"{random.uniform(0, max(eff - need - 0.2, 0)) * f:.2f}"]
+    pz = f"(1+0.07*pow(max(0,1-t/0.45),2))"
+    vf = (("setpts=PTS/%.3f," % f) if f < 1 else "") + (
+        f"scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},setsar=1,fps={FPS},"
+        f"scale=w='2*trunc({W}*{pz}/2)':h='2*trunc({H}*{pz}/2)':eval=frame,crop={W}:{H},{GRADE},format=yuv420p")
+    run(["ffmpeg", "-y"] + pre + ["-i", vis["path"], "-vf", vf, "-frames:v", str(frames)] + ENC + [out])
 
 
-def build_ass(words, scenes, accent, channel, total, title='', credits=()):
+def seg_image(out, src, frames, k, host=False):
+    zoom = f"min(1+0.06*on/{frames},1.06)" if k % 2 == 0 else f"max(1.06-0.06*on/{frames},1.0)"
+    vf = (f"scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,"
+          f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps={FPS},format=yuv420p")
+    if not host:
+        vf += "," + GRADE
+    run(["ffmpeg", "-y", "-i", src, "-vf", vf, "-frames:v", str(frames)] + ENC + [out])
+
+
+# ------------------------------------------------------------------ animated charts
+def _font(size):
+    for p in ("/usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf", "/usr/share/fonts/truetype/montserrat/Montserrat-SemiBold.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"):
+        if Path(p).exists():
+            return ImageFont.truetype(p, size)
+    return ImageFont.load_default()
+
+
+def _ease(x):
+    x = max(0.0, min(1.0, x))
+    return 1 - (1 - x) ** 3
+
+
+def _fmt(v, unit):
+    s = f"{v:,.0f}" if abs(v) >= 100 or float(v).is_integer() else f"{v:,.1f}"
+    return s + (unit or "")
+
+
+def chart_ok(c):
+    try:
+        if not isinstance(c, dict) or c.get("type") not in ("bar", "line", "timeline"):
+            return False
+        lab, val = c.get("labels"), c.get("values")
+        if not (isinstance(lab, list) and isinstance(val, list) and 2 <= len(lab) == len(val) <= 8):
+            return False
+        c["values"] = [float(v) for v in val]
+        return True
+    except Exception:
+        return False
+
+
+def draw_chart(c, p, accent):
+    acc = tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4))
+    im = Image.new("RGB", (W, H), (10, 15, 24))
+    d = ImageDraw.Draw(im)
+    for y in range(H):
+        k = y / H
+        d.line([(0, y), (W, y)], fill=(int(10 + 8 * k), int(15 + 10 * k), int(24 + 14 * k)))
+    for gx in range(70, 780, 70):
+        d.line([(gx, 120), (gx, 650)], fill=(24, 34, 48), width=1)
+    ft, fl, fv = _font(40), _font(25), _font(27)
+    d.text((70, 46), str(c.get("title", ""))[:48], font=ft, fill=(240, 245, 250))
+    d.rectangle([70, 100, 70 + int(160 * _ease(p * 3)), 105], fill=acc)
+    lab, val, unit, typ = c["labels"], c["values"], c.get("unit", ""), c["type"]
+    n = len(val)
+    if typ == "bar":
+        mx = max(val) or 1
+        top, area = 150, 470
+        bh = int(min(54, area / n * 0.62))
+        for k in range(n):
+            y = top + int(k * area / n)
+            pk = _ease((p * 1.5 - k * 0.09) / 0.55)
+            d.text((70, y + bh // 2 - 14), str(lab[k])[:16], font=fl, fill=(170, 185, 200))
+            x0, wmax = 290, 380
+            wbar = int(wmax * (val[k] / mx) * pk)
+            if wbar > 2:
+                d.rectangle([x0, y, x0 + wbar, y + bh], fill=acc)
+                d.rectangle([x0, y, x0 + wbar, y + 4], fill=tuple(min(255, ch + 70) for ch in acc))
+            if pk > 0.85:
+                d.text((x0 + wbar + 14, y + bh // 2 - 15), _fmt(val[k] * 1.0, unit), font=fv, fill=(240, 245, 250))
+    elif typ == "line":
+        mn, mx = min(val), max(val)
+        rng = (mx - mn) or 1
+        x0, x1, y0, y1 = 110, 660, 560, 190
+        pts = [(x0 + (x1 - x0) * k / (n - 1), y0 - (y0 - y1) * (val[k] - mn) / rng) for k in range(n)]
+        d.line([(x0, y0 + 20), (x1, y0 + 20)], fill=(60, 75, 95), width=2)
+        prog = _ease(p * 1.3) * (n - 1)
+        for k in range(n - 1):
+            if prog >= k:
+                fr = min(1.0, prog - k)
+                ax, ay = pts[k]
+                bx, by = pts[k + 1]
+                d.line([(ax, ay), (ax + (bx - ax) * fr, ay + (by - ay) * fr)], fill=acc, width=6)
+        for k in range(n):
+            if prog >= k - 0.01:
+                x, y = pts[k]
+                d.ellipse([x - 9, y - 9, x + 9, y + 9], fill=(10, 15, 24), outline=acc, width=4)
+                d.text((x - 30, y - 46), _fmt(val[k], unit), font=fv, fill=(240, 245, 250))
+                d.text((x - 28, y0 + 34), str(lab[k])[:10], font=fl, fill=(170, 185, 200))
+    else:  # timeline
+        order = sorted(range(n), key=lambda k: val[k])
+        mn, mx = val[order[0]], val[order[-1]]
+        rng = (mx - mn) or 1
+        ay = 380
+        d.line([(100, ay), (100 + int(560 * _ease(p * 2)), ay)], fill=(90, 105, 125), width=4)
+        for r, k in enumerate(order):
+            pk = _ease((p * 1.6 - r * 0.12) / 0.4)
+            if pk <= 0:
+                continue
+            x = 130 + int(500 * (val[k] - mn) / rng) if n > 1 else 400
+            up = r % 2 == 0
+            d.ellipse([x - 11, ay - 11, x + 11, ay + 11], fill=acc)
+            ty = ay - 40 - int(110 * pk) if up else ay + 40 + int(110 * pk) - 40
+            d.line([(x, ay), (x, ty + (40 if up else 0))], fill=acc, width=2)
+            d.text((x + 12, ty - (34 if up else 0)), f"{val[k]:.0f}", font=fv, fill=acc)
+            words, line, lines = str(lab[k]).split(), "", []
+            for w_ in words:
+                if len(line) + len(w_) > 16:
+                    lines.append(line)
+                    line = w_
+                else:
+                    line = (line + " " + w_).strip()
+            lines.append(line)
+            for li, tx in enumerate(lines[:3]):
+                d.text((x + 12, ty + (4 if up else 34) + li * 26), tx, font=fl, fill=(225, 232, 240))
+    return im
+
+
+def seg_chart(out, c, frames, accent):
+    proc = subprocess.Popen(["ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+                             "-vf", "format=yuv420p"] + ENC + [str(out)], stdin=subprocess.PIPE)
+    for f in range(frames):
+        p = min(1.0, f / (frames * 0.62))
+        proc.stdin.write(draw_chart(c, p, accent).tobytes())
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("chart ffmpeg failed")
+
+
+# ------------------------------------------------------------------ captions
+def build_ass(words, scenes, accent, channel, total, title=""):
     acc = re.sub(r"[^0-9A-Fa-f]", "", accent)[:6].ljust(6, "0")
     acc_ass = "&H00" + acc[4:6] + acc[2:4] + acc[0:2] + "&"
     hdr = f"""[Script Info]
@@ -373,8 +498,6 @@ Style: Cap,Montserrat,40,&H00FFFFFF,&H00FFFFFF,&H00000000,&H96000000,-1,0,0,0,10
 Style: Big,Montserrat ExtraBold,58,&H00FFFFFF,&H00FFFFFF,&H00000000,&H78000000,-1,0,0,0,100,100,0,0,3,10,0,4,70,520,0,1
 Style: Chap,Montserrat ExtraBold,46,{acc_ass},{acc_ass},&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,3,0,8,60,60,52,1
 Style: Title,Montserrat ExtraBold,64,{acc_ass},{acc_ass},&H00000000,&H00000000,-1,0,0,0,100,100,2,0,1,3,0,5,60,470,0,1
-Style: CredHead,Montserrat ExtraBold,40,{acc_ass},{acc_ass},&H00111111,&H00000000,-1,0,0,0,100,100,2,0,1,0,0,7,170,520,125,1
-Style: Credits,Montserrat,27,&H00222222,&H00222222,&H00FFFFFF,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,170,520,195,1
 Style: Brand,Montserrat,26,&H78FFFFFF,&H78FFFFFF,&H00000000,&H00000000,-1,0,0,0,100,100,1,0,1,1.5,0,9,40,40,26,1
 
 [Events]
@@ -406,20 +529,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             ev.append(f"Dialogue: 1,{base.ass_time(s)},{base.ass_time(end)},Cap,,0,0,0,,{' '.join(parts)}")
     if title:
         flick = ("{\\blur6\\alpha&H00&\\t(90,130,\\alpha&HFF&)\\t(130,190,\\alpha&H00&)\\t(300,340,\\alpha&HFF&)\\t(340,380,\\alpha&H00&)"
-                 "\\t(520,560,\\alpha&H90&)\\t(560,610,\\alpha&H00&)\\t(3000,3600,\\alpha&HFF&)}")
-        ev.append(f"Dialogue: 4,{base.ass_time(0.3)},{base.ass_time(3.9)},Title,,0,0,0,,{flick}{base.clean_ass(title[:90].upper())}")
+                 "\\t(520,560,\\alpha&H90&)\\t(560,610,\\alpha&H00&)\\t(2600,3200,\\alpha&HFF&)}")
+        ev.append(f"Dialogue: 4,{base.ass_time(0.3)},{base.ass_time(3.5)},Title,,0,0,0,,{flick}{base.clean_ass(title[:90].upper())}")
     for sc in scenes:
-        if sc.get("outro"):
-            ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.3)},{base.ass_time(sc['start'] + sc['d'])},CredHead,,0,0,0,,SOURCES & CREDITS")
-            body = "\\N".join(base.clean_ass(re.sub(r"\s*\(https?://[^)]*\)", "", c))[:78] for c in list(credits)[:9]) or "Stock footage and images from free-license libraries."
-            ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.3)},{base.ass_time(sc['start'] + sc['d'])},Credits,,0,0,0,,{body}")
-            continue
-        if sc.get("onscreen"):
+        if sc.get("onscreen") and sc["beat"] != "chart":
             e = sc["start"] + max(sc["d"], 2.6)
             ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.2)},{base.ass_time(e)},Big,,0,0,0,,{{\\fad(200,200)}}{base.clean_ass(sc['onscreen'][:46].upper())}")
-        if sc.get("chapter"):
-            cs = sc["start"] + (4.0 if sc["i"] == 0 and title else 0)
-            ev.append(f"Dialogue: 3,{base.ass_time(cs)},{base.ass_time(cs + 3.2)},Chap,,0,0,0,,{{\\fad(350,350)\\blur4}}{base.clean_ass(sc['chapter'])}")
+        if sc.get("chapter") and sc["beat"] != "chart":
+            cs = sc["start"] + (3.7 if sc["i"] == 0 and title else 0)
+            ev.append(f"Dialogue: 3,{base.ass_time(cs)},{base.ass_time(cs + 3.0)},Chap,,0,0,0,,{{\\fad(350,350)\\blur4}}{base.clean_ass(sc['chapter'])}")
     return hdr + "\n".join(ev) + "\n"
 
 
@@ -438,87 +556,113 @@ def main():
     lines = payload["lines"]
     n = len(lines)
     import shutil
-    shutil.rmtree(WORK, ignore_errors=True)
-    WORK.mkdir(parents=True)
+    marker = WORK / ".job"
+    if WORK.exists() and marker.exists() and marker.read_text().strip() == job:
+        log(f"RESUME: reusing finished work for {job}")
+        shutil.rmtree(WORK / "frames", ignore_errors=True)
+        for f in ("bg.mp4", "voice.wav"):
+            (WORK / f).unlink(missing_ok=True)
+    else:
+        shutil.rmtree(WORK, ignore_errors=True)
+        WORK.mkdir(parents=True)
+        marker.write_text(job)
     OUT.mkdir(exist_ok=True)
     t_start = time.time()
     log(f"job {job}: {n} lines")
 
-    # 1) voice + timing
+    # 1) voice + timing (cached per line)
     scenes, t0 = [], 0.0
     for i, ln in enumerate(lines):
-        mp3, wav = WORK / f"line_{i:03d}.mp3", WORK / f"line_{i:03d}.wav"
-        ev = base.tts_line(ln["text"], voice, rate, pitch, lang, str(mp3))
-        dur = base.probe_dur(mp3)
+        mp3, wav, meta = WORK / f"line_{i:03d}.mp3", WORK / f"line_{i:03d}.wav", WORK / f"line_{i:03d}.json"
+        if mp3.exists() and meta.exists():
+            m = json.loads(meta.read_text())
+            dur, words = m["dur"], [tuple(w) for w in m["words"]]
+        else:
+            ev = base.tts_line(ln["text"], voice, rate, pitch, lang, str(mp3))
+            dur = base.probe_dur(mp3)
+            words = base.align_words(ln["text"], ev, dur, mp3, lang, payload.get("whisper") == "always")
+            meta.write_text(json.dumps({"dur": dur, "words": words}))
         nxt_chapter = i + 1 < n and lines[i + 1].get("chapter")
         gap = 0.7 if nxt_chapter else (0.45 if ln["text"].rstrip().endswith(("?", ":")) else 0.28)
         frames = max(int(math.ceil((dur + gap) * FPS)), int(2 * FPS))
         d = frames / FPS
         run(["ffmpeg", "-y", "-i", mp3, "-ar", 48000, "-ac", 2, "-af", f"apad=whole_dur={d:.4f}", wav])
-        words = base.align_words(ln["text"], ev, dur, mp3, lang, payload.get("whisper") == "always")
+        beat = ln.get("beat") if ln.get("beat") in ("host", "chart") else "broll"
         scenes.append({"i": i, "start": t0, "d": d, "frames": frames, "wav": wav, "text": ln["text"],
                        "words": [(w, t0 + s, t0 + e) for w, s, e in words], "emotion": (ln.get("emotion") or "neutral").lower(),
-                       "beat": "host" if ln.get("beat") == "host" else "broll", "queries": ln.get("queries") or [], "onscreen": ln.get("onscreen"), "chapter": ln.get("chapter")})
+                       "beat": beat, "queries": ln.get("queries") or [], "onscreen": ln.get("onscreen"), "chapter": ln.get("chapter"), "chart": ln.get("chart")})
         t0 += d
     total_frames = sum(s["frames"] for s in scenes)
     total = total_frames / FPS
     log(f"narration {total:.1f}s ({total / 60:.1f} min), tts done in {time.time() - t_start:.0f}s")
-    # 2) visuals + segments
-    used, credits = set(), []
-    hb = host_bg()
-    for s in scenes:
-        if s["beat"] == "host":
-            vis = {"kind": "image", "path": hb}
-        else:
-            q = [x for x in s["queries"] if x] or [payload.get("topic", "abstract light")]
-            vis = get_visual(q, s["i"], used)
-            if vis.get("credit"):
-                credits.append(vis["credit"])
-        s["seg"] = make_segment(s["i"], s["frames"], vis, s["beat"], hb)
-        if s["i"] % 10 == 0:
-            log(f"segments {s['i'] + 1}/{n}  ({time.time() - t_start:.0f}s)")
-    # outro: sources & credits card (also satisfies attribution inside the video itself)
-    uniq_credits = list(dict.fromkeys(credits))
-    ofr = 7 * FPS
-    owav = WORK / "outro.wav"
-    run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "7", owav])
-    scenes.append({"i": n, "start": t0, "d": 7.0, "frames": ofr, "wav": owav, "text": "", "words": [], "emotion": "smile", "beat": "host",
-                   "queries": [], "onscreen": None, "chapter": None, "outro": True,
-                   "seg": make_segment(n, ofr, {"kind": "image", "path": hb}, "host", hb)})
-    t0 += 7.0
-    total_frames = sum(s["frames"] for s in scenes)
-    total = total_frames / FPS
     (WORK / "list.txt").write_text("".join(f"file '{s['wav'].name}'\n" for s in scenes))
     run(["ffmpeg", "-y", "-f", "concat", "-safe", 0, "-i", "list.txt", "-c", "copy", "voice.wav"], cwd=WORK)
-    (WORK / "segs.txt").write_text("".join(f"file '{s['seg'].name}'\n" for s in scenes))
+
+    # 2) visuals: several cuts per line, charts, host cards (cached per part)
+    used, credits, seg_files = set(), [], []
+    hb = host_bg()
+    for s in scenes:
+        i, F = s["i"], s["frames"]
+        if s["beat"] == "chart" and chart_ok(s["chart"]):
+            parts = [("chart", F)]
+        elif s["beat"] == "host":
+            parts = [("host", F)]
+        else:
+            k = 1 if F <= 5.0 * FPS else (2 if F <= 9.5 * FPS else 3)
+            parts = [("broll", F // k + (F % k if j == k - 1 else 0)) for j in range(k)]
+        for j, (kind, fr) in enumerate(parts):
+            out, side = WORK / f"seg_{i:03d}_{j}.mp4", WORK / f"seg_{i:03d}_{j}.json"
+            if out.exists() and side.exists():
+                cr = json.loads(side.read_text()).get("credit")
+            else:
+                cr = None
+                if kind == "chart":
+                    seg_chart(out, s["chart"], fr, accent)
+                elif kind == "host":
+                    seg_image(out, hb, fr, i, host=True)
+                else:
+                    qs = [x for x in s["queries"] if x] or [payload.get("topic", "abstract light")]
+                    ordered = qs[j % len(qs):] + qs[:j % len(qs)]
+                    vis = get_visual(ordered, f"{i}_{j}", used)
+                    cr = vis.get("credit")
+                    if vis["kind"] == "video":
+                        seg_video(out, vis, fr)
+                    else:
+                        seg_image(out, vis["path"], fr, i + j)
+                    try:
+                        Path(vis["path"]).unlink()
+                    except Exception:
+                        pass
+                side.write_text(json.dumps({"credit": cr}))
+            if cr:
+                credits.append(cr)
+            seg_files.append(out)
+        if i % 10 == 0:
+            log(f"segments {i + 1}/{n}  ({time.time() - t_start:.0f}s)")
+    uniq_credits = list(dict.fromkeys(credits))
+    (WORK / "segs.txt").write_text("".join(f"file '{p.name}'\n" for p in seg_files))
     run(["ffmpeg", "-y", "-f", "concat", "-safe", 0, "-i", "segs.txt", "-c", "copy", "bg.mp4"], cwd=WORK)
 
-    # 3) character frames
+    # 3) character frames (fixed size + position, audio-reactive)
     chars = normalize_chars()
     _G["sets"] = build_char_sets(chars, accent)
-    emo, lay, since = [], [], []
+    emo, since = [], []
     for s in scenes:
         e = s["emotion"] if s["emotion"] in chars else "neutral"
         for k in range(s["frames"]):
-            emo.append(e); lay.append(s["beat"]); since.append(k)
-    amp = envelope(WORK / "voice.wav", total_frames)
-    ticks, fcount = [], 0
-    for s_ in scenes:
-        if s_.get("chapter") and fcount > 0:
-            ticks.append(int(W * fcount / total_frames))
-        fcount += s_["frames"]
-    _G["plan"] = {"emo": emo, "lay": lay, "since": since, "amp": amp, "total": total_frames, "ticks": ticks}
+            emo.append(e)
+            since.append(k)
+    _G["plan"] = {"emo": emo, "since": since, "amp": envelope(WORK / "voice.wav", total_frames)}
     fdir = WORK / "frames"
-    fdir.mkdir()
-    chunk = 240
-    jobs = [(a, min(a + chunk, total_frames), str(fdir)) for a in range(0, total_frames, chunk)]
+    fdir.mkdir(exist_ok=True)
+    jobs = [(a, min(a + 240, total_frames), str(fdir)) for a in range(0, total_frames, 240)]
     with ProcessPoolExecutor(max_workers=os.cpu_count() or 2) as ex:
         list(ex.map(render_chunk, jobs))
     log(f"character frames done ({time.time() - t_start:.0f}s)")
 
     # 4) captions + final mix
     allw = [w for s in scenes for w in s["words"]]
-    (WORK / "captions.ass").write_text(build_ass(allw, scenes, accent, payload.get("channel", ""), total, (payload.get("meta") or {}).get("title", ""), uniq_credits), encoding="utf-8")
+    (WORK / "captions.ass").write_text(build_ass(allw, scenes, accent, payload.get("channel", ""), total, (payload.get("meta") or {}).get("title", "")), encoding="utf-8")
     music = sorted(list((ROOT / "assets" / "music").glob("*.mp3")) + list((ROOT / "assets" / "music").glob("*.wav")))
     cmd = ["ffmpeg", "-y", "-hide_banner", "-i", "bg.mp4", "-framerate", str(FPS), "-i", "frames/f_%06d.png", "-i", "voice.wav"]
     voice_chain = ("[2:a]aformat=sample_rates=48000:channel_layouts=stereo,highpass=f=70,acompressor=threshold=0.1:ratio=3:attack=5:release=80:makeup=2,"
@@ -544,9 +688,8 @@ def main():
     chapters = [{"t": fmt_ts(s["start"]), "title": s["chapter"]} for s in scenes if s.get("chapter")]
     if chapters and chapters[0]["t"] != "0:00":
         chapters.insert(0, {"t": "0:00", "title": "Intro"})
-    uniq = uniq_credits
     res = {"job_id": job, "file": outname, "duration": round(total, 1), "size_mb": round((OUT / outname).stat().st_size / 1e6, 1),
-           "lines": n, "chapters": chapters, "credits": uniq[:60], "render_seconds": int(time.time() - t_start)}
+           "lines": n, "chapters": chapters, "credits": uniq_credits[:60], "render_seconds": int(time.time() - t_start)}
     (OUT / "result.json").write_text(json.dumps(res, ensure_ascii=False))
     log("DONE", {k: v for k, v in res.items() if k not in ("credits", "chapters")})
 
