@@ -32,3 +32,8 @@ Local test (no network): FAKE_TTS=1 FAKE_BROLL=1 CHAR_DIR=/path/to/pngs python r
 - Long video: fixed character size/position, 2-3 cuts per line with punch-in, slow-mo for short clips, animated charts (bar/line/timeline), no progress bar, no credits card (credits go to the description).
 - **Resume:** finished voice/segments are cached per job; failed renders auto-resume (up to 3 attempts).
 - **YouTube private upload** (tools/yt_upload.py): secrets YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN. Uploads as PRIVATE, only if meta.upload is true and QC passed.
+
+## v5
+- **Simulated UI scenes** (`tools/ui_scenes`): phishing email, SMS, fake browser URL, terminal logs, with animated red-flag callouts. Rendered from HTML with headless Chrome (puppeteer-core) on the runner; falls back to stock footage if it fails.
+- **Live-data charts**: n8n pulls HIBP, CISA KEV and NVD numbers and the script picks a chart by id (no LLM-written numbers). Charts show a "Source:" badge.
+- Chapters are re-ordered by `chapter_number`, so a fallback model never scrambles them.

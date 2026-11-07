@@ -4,3 +4,5 @@ payload.json
 __pycache__/
 node_modules/
 work_long/
+node_modules/
+tools/ui_scenes/node_modules/

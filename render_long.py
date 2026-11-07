@@ -393,6 +393,27 @@ def chart_ok(c):
         return False
 
 
+def ui_ok(u):
+    try:
+        if not isinstance(u, dict) or u.get("type") not in ("email", "sms", "browser", "terminal"):
+            return False
+        if u["type"] == "email":
+            return bool(u.get("subject")) and bool(u.get("from_addr"))
+        if u["type"] == "sms":
+            return isinstance(u.get("messages"), list) and len(u["messages"]) >= 1
+        if u["type"] == "browser":
+            return bool(u.get("url"))
+        return isinstance(u.get("lines"), list) and len(u["lines"]) >= 2
+    except Exception:
+        return False
+
+
+def seg_ui(out, spec, frames, accent, idx):
+    sp = WORK / f"ui_{idx}.json"
+    sp.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    run(["node", str(ROOT / "tools" / "ui_scenes" / "render_ui.mjs"), str(sp), str(out), str(frames), str(FPS), accent])
+
+
 def draw_chart(c, p, accent):
     acc = tuple(int(accent[i:i + 2], 16) for i in (0, 2, 4))
     im = Image.new("RGB", (W, H), (10, 15, 24))
@@ -405,6 +426,8 @@ def draw_chart(c, p, accent):
     ft, fl, fv = _font(40), _font(25), _font(27)
     d.text((70, 46), str(c.get("title", ""))[:48], font=ft, fill=(240, 245, 250))
     d.rectangle([70, 100, 70 + int(160 * _ease(p * 3)), 105], fill=acc)
+    if c.get("source"):
+        d.text((70, 672), "Source: " + str(c["source"])[:64], font=_font(19), fill=(125, 140, 158))
     lab, val, unit, typ = c["labels"], c["values"], c.get("unit", ""), c["type"]
     n = len(val)
     if typ == "bar":
@@ -532,10 +555,10 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                  "\\t(520,560,\\alpha&H90&)\\t(560,610,\\alpha&H00&)\\t(2600,3200,\\alpha&HFF&)}")
         ev.append(f"Dialogue: 4,{base.ass_time(0.3)},{base.ass_time(3.5)},Title,,0,0,0,,{flick}{base.clean_ass(title[:90].upper())}")
     for sc in scenes:
-        if sc.get("onscreen") and sc["beat"] != "chart":
+        if sc.get("onscreen") and sc["beat"] not in ("chart", "ui"):
             e = sc["start"] + max(sc["d"], 2.6)
             ev.append(f"Dialogue: 2,{base.ass_time(sc['start'] + 0.2)},{base.ass_time(e)},Big,,0,0,0,,{{\\fad(200,200)}}{base.clean_ass(sc['onscreen'][:46].upper())}")
-        if sc.get("chapter") and sc["beat"] != "chart":
+        if sc.get("chapter") and sc["beat"] not in ("chart", "ui"):
             cs = sc["start"] + (3.7 if sc["i"] == 0 and title else 0)
             ev.append(f"Dialogue: 3,{base.ass_time(cs)},{base.ass_time(cs + 3.0)},Chap,,0,0,0,,{{\\fad(350,350)\\blur4}}{base.clean_ass(sc['chapter'])}")
     return hdr + "\n".join(ev) + "\n"
@@ -587,10 +610,10 @@ def main():
         frames = max(int(math.ceil((dur + gap) * FPS)), int(2 * FPS))
         d = frames / FPS
         run(["ffmpeg", "-y", "-i", mp3, "-ar", 48000, "-ac", 2, "-af", f"apad=whole_dur={d:.4f}", wav])
-        beat = ln.get("beat") if ln.get("beat") in ("host", "chart") else "broll"
+        beat = ln.get("beat") if ln.get("beat") in ("host", "chart", "ui") else "broll"
         scenes.append({"i": i, "start": t0, "d": d, "frames": frames, "wav": wav, "text": ln["text"],
                        "words": [(w, t0 + s, t0 + e) for w, s, e in words], "emotion": (ln.get("emotion") or "neutral").lower(),
-                       "beat": beat, "queries": ln.get("queries") or [], "onscreen": ln.get("onscreen"), "chapter": ln.get("chapter"), "chart": ln.get("chart")})
+                       "beat": beat, "queries": ln.get("queries") or [], "onscreen": ln.get("onscreen"), "chapter": ln.get("chapter"), "chart": ln.get("chart"), "ui": ln.get("ui")})
         t0 += d
     total_frames = sum(s["frames"] for s in scenes)
     total = total_frames / FPS
@@ -605,6 +628,8 @@ def main():
         i, F = s["i"], s["frames"]
         if s["beat"] == "chart" and chart_ok(s["chart"]):
             parts = [("chart", F)]
+        elif s["beat"] == "ui" and ui_ok(s.get("ui")):
+            parts = [("ui", F)]
         elif s["beat"] == "host":
             parts = [("host", F)]
         else:
@@ -620,7 +645,13 @@ def main():
                     seg_chart(out, s["chart"], fr, accent)
                 elif kind == "host":
                     seg_image(out, hb, fr, i, host=True)
-                else:
+                elif kind == "ui":
+                    try:
+                        seg_ui(out, s["ui"], fr, accent, i)
+                    except Exception as e:  # noqa
+                        log(f"ui scene {i} failed, using stock footage instead: {e}")
+                        kind = "broll"
+                if kind == "broll":
                     qs = [x for x in s["queries"] if x] or [payload.get("topic", "abstract light")]
                     ordered = qs[j % len(qs):] + qs[:j % len(qs)]
                     vis = get_visual(ordered, f"{i}_{j}", used)

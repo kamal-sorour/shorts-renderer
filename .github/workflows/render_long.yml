@@ -64,6 +64,9 @@ jobs:
           sudo apt-get install -y -qq ffmpeg fonts-montserrat fonts-noto-core
           pip install -r requirements.txt
 
+      - name: Install UI-scene renderer (puppeteer-core, uses the runner's own Chrome)
+        run: (cd tools/ui_scenes && npm install --silent --no-audit --no-fund)
+
       - name: Render
         id: render
         run: |
